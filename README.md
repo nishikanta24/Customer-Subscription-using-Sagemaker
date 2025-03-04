@@ -1,10 +1,17 @@
 # Predicting Customer Subscription Using AWS SageMaker
 
 ## Project Overview
-This project focuses on developing a machine learning model to predict whether a customer will subscribe to a term deposit. Using AWS SageMaker, we build and deploy an optimized model trained on a dataset from a bank's marketing campaign. 
+This project focuses on developing a machine learning model to predict whether a customer will subscribe to a term deposit. Using AWS SageMaker, we build and deploy an optimized XGBoost model trained on a dataset from a bank's marketing campaign. The project demonstrates how to preprocess data, train a model, evaluate its performance, and deploy it as a scalable endpoint on AWS SageMaker.
+
+## Key Features of AWS SageMaker
+- **Scalable ML Training**: Train models on cloud instances without worrying about local hardware limitations.
+- **Managed Model Deployment**: Deploy models as API endpoints for real-time predictions.
+- **Hyperparameter Optimization**: Automatically tune models for optimal performance.
+- **Seamless S3 Integration**: Store and retrieve datasets directly from AWS S3.
+- **Built-in Algorithms**: Utilize pre-configured machine learning models like XGBoost, TensorFlow, and more.
 
 ## Dataset
-The dataset consists of **41,188** records with **62** features, including:
+The dataset consists of 41,188 records with 62 features, including:
 - **Customer Information** (e.g., `age`, `job_*`, `marital_*`, `education_*`)
 - **Banking Behavior** (e.g., `default_*`, `housing_*`, `loan_*`)
 - **Campaign Information** (e.g., `contact_*`, `month_*`, `day_of_week_*`)
@@ -12,123 +19,156 @@ The dataset consists of **41,188** records with **62** features, including:
 - **Target Variable**: `y_yes` (1 if subscribed, 0 otherwise)
 
 ## Implementation Steps
+
 ### 1. Setup AWS Environment
-- Install required libraries: `sagemaker`, `boto3`.
-- Connect to AWS services using `boto3` to manage SageMaker, S3, and other resources.
+We begin by setting up the AWS environment, including initializing SageMaker and creating an S3 bucket for data storage.
 
 ```python
 import sagemaker
 import boto3
-from sagemaker import get_execution_role
+from sagemaker import image_uris
+from sagemaker.session import s3_input, Session
 
-role = get_execution_role()
-session = sagemaker.Session()
-bucket = session.default_bucket()
+# Initialize SageMaker and S3
+bucket_name = 'bank-application-nishi-24'
+my_region = boto3.session.Session().region_name  # Set the region
+print(my_region)
+
+# Create an S3 bucket
+s3 = boto3.client('s3')
+try:
+    if my_region == 'eu-north-1':
+        s3.create_bucket(
+            Bucket=bucket_name,
+            CreateBucketConfiguration={'LocationConstraint': my_region}
+        )
+    print('S3 bucket created successfully')
+except Exception as e:
+    print('S3 error:', e)
 ```
-- The above code initializes SageMaker and assigns an execution role.
 
 ### 2. Data Preprocessing & Storage
-- Load and preprocess the dataset.
+The dataset is loaded, preprocessed, and uploaded to the S3 bucket for SageMaker training.
+
 ```python
 import pandas as pd
+import urllib
 
-# Load dataset
-df = pd.read_csv("bank_clean.csv")
+# Download the dataset
+try:
+    urllib.request.urlretrieve("https://d1.awsstatic.com/tmt/build-train-deploy-machine-learning-model-sagemaker/bank_clean.27f01fbbdf43271788427f3682996ae29ceca05d.csv", "bank_clean.csv")
+    print('Success: Downloaded bank_clean.csv')
+except Exception as e:
+    print('Data load error: ', e)
 
-# Convert target variable to numeric
-df['y_yes'] = df['y_yes'].astype(int)
+# Load the dataset into a DataFrame
+try:
+    model_data = pd.read_csv('./bank_clean.csv', index_col=0)
+    print('Success: Data loaded into DataFrame')
+except Exception as e:
+    print('Data load error: ', e)
+
+# Train-test split
+import numpy as np
+train_data, test_data = np.split(model_data.sample(frac=1, random_state=1729), [int(0.7 * len(model_data))])
+print(train_data.shape, test_data.shape)
 ```
-- The dataset is loaded and the target column is converted into integer format for model training.
-- Upload the dataset to an **S3 bucket** for SageMaker training.
-```python
-from sagemaker.s3 import S3Uploader
-
-train_data_path = f's3://{bucket}/train_data.csv'
-S3Uploader.upload("bank_clean.csv", train_data_path)
-```
-- This uploads the dataset to S3, allowing SageMaker to access it during training.
 
 ### 3. Model Training with SageMaker XGBoost
-- Use SageMaker's **built-in XGBoost algorithm** to train a predictive model.
-- Perform hyperparameter tuning **locally first**, then apply the best parameters in SageMaker.
+We use SageMaker's built-in XGBoost algorithm to train the model.
+
 ```python
-from sagemaker.estimator import Estimator
-
-xgboost_estimator = Estimator(
-    image_uri=sagemaker.image_uris.retrieve("xgboost", session.boto_region_name, "1.5-1"),
-    role=role,
-    instance_count=1,
-    instance_type="ml.m5.large",
-    output_path=f's3://{bucket}/output',
-    sagemaker_session=session
+# Retrieve the XGBoost container
+container = image_uris.retrieve(
+    framework='xgboost',
+    region=boto3.session.Session().region_name,
+    instance_type='ml.t3.medium',
+    version='1.5-1'
 )
 
-xgboost_estimator.set_hyperparameters(
-    objective="binary:logistic",
-    num_round=100,
-    max_depth=5,
-    eta=0.2
-)
+# Initialize hyperparameters
+hyperparameters = {
+    "max_depth": "5",
+    "eta": "0.2",
+    "gamma": "4",
+    "min_child_weight": "6",
+    "subsample": "0.7",
+    "objective": "binary:logistic",
+    "num_round": "50"
+}
 ```
-- The above code initializes an XGBoost estimator with optimized hyperparameters.
-- **Key Differences from Normal ML Training:**
-  - Instead of training locally, we send data to S3 and let SageMaker handle training.
-  - SageMaker uses a predefined XGBoost container instead of manually defining a model pipeline.
-  - Training is done in a distributed environment, allowing scalability.
 
 ### 4. Model Evaluation & Metrics
-- After training, we evaluated the model on test data.
-```python
-from sklearn.metrics import accuracy_score
+After training, the model is evaluated on the test dataset.
 
-y_pred = model.predict(X_test)
-accuracy = accuracy_score(y_test, y_pred)
-print(f"Model Accuracy: {accuracy}")
+```python
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+# Make predictions
+predictions = xgb_predictor.predict(test_data_array).decode('utf-8')
+predictions_array = np.loadtxt(predictions.splitlines(), delimiter=',')
+
+# Calculate metrics
+accuracy = accuracy_score(test_data['y_yes'], np.round(predictions_array))
+precision = precision_score(test_data['y_yes'], np.round(predictions_array))
+recall = recall_score(test_data['y_yes'], np.round(predictions_array))
+f1 = f1_score(test_data['y_yes'], np.round(predictions_array))
+
+print(f"Accuracy: {accuracy}\nPrecision: {precision}\nRecall: {recall}\nF1-score: {f1}")
 ```
-- The key metrics achieved were:
-  - **Accuracy:** 92%
-  - **Precision:** 88%
-  - **Recall:** 85%
-  - **F1-score:** 86%
-- The model showed promising performance, effectively distinguishing between subscribed and non-subscribed customers.
 
 ### 5. Model Deployment
-- Deploy the trained model as a **SageMaker endpoint**.
+The trained model is deployed as a SageMaker endpoint for real-time predictions.
+
 ```python
-predictor = xgboost_estimator.deploy(
+# Deploy the model
+xgb_predictor = estimator.deploy(
     initial_instance_count=1,
-    instance_type="ml.m5.large"
+    instance_type='ml.m5.large'
 )
-```
-- Perform inference on new data using the deployed endpoint.
-```python
-response = predictor.predict(sample_data)
+
+# Perform inference
+response = xgb_predictor.predict(sample_data)
 print("Prediction: ", response)
 ```
-- **Why Deployment on SageMaker is Different:**
-  - Instead of a simple `.predict()` function, we invoke the endpoint via `boto3` API calls.
-  - The model runs on AWS infrastructure rather than local machines.
-  - Real-time inference is scalable and cost-efficient.
 
-### 6. Deleting Endpoints and Resources
-- To avoid unnecessary AWS costs, all endpoints were deleted after testing.
-- This is a crucial step since keeping endpoints running incurs charges even if they are not in use.
+### 6. Cleanup Resources
+To avoid unnecessary AWS costs, all endpoints and S3 objects are deleted after testing.
+
 ```python
-predictor.delete_endpoint()
-session.delete_endpoint(endpoint_name)
+# Delete SageMaker endpoints and S3 objects
+def cleanup_resources(bucket_name):
+    # Delete all SageMaker endpoints
+    sagemaker_client = boto3.client('sagemaker')
+    endpoints = sagemaker_client.list_endpoints()['Endpoints']
+    for endpoint in endpoints:
+        endpoint_name = endpoint['EndpointName']
+        print(f"Deleting endpoint: {endpoint_name}")
+        sagemaker_client.delete_endpoint(EndpointName=endpoint_name)
+    print("All endpoints deleted.")
+
+    # Delete all objects in the S3 bucket
+    s3_resource = boto3.resource('s3')
+    bucket = s3_resource.Bucket(bucket_name)
+    print(f"Deleting all objects in bucket: {bucket_name}")
+    bucket.objects.all().delete()
+    print(f"All objects in bucket '{bucket_name}' deleted.")
+
+# Run cleanup
+cleanup_resources(bucket_name)
 ```
-- This ensures that we efficiently manage cloud resources and expenses.
 
 ## Results & Conclusion
-- The model predicts whether a customer will subscribe to a term deposit.
-- AWS SageMaker allows scalable training and deployment without heavy local resource usage.
-- The key takeaway is that **SageMaker automates ML processes but requires proper resource management** to avoid extra costs.
-
+- The model achieves an **89.7% accuracy** in predicting customer subscriptions.
+- AWS SageMaker simplifies the process of training, deploying, and managing machine learning models at scale.
+- Proper resource management is crucial to avoid unnecessary costs.
 
 
 ## Technologies Used
 - **AWS SageMaker**
-- **Python (Pandas, NumPy, Scikit-learn, Boto3)**
+- **Python** (Pandas, NumPy, Scikit-learn, Boto3)
 - **XGBoost**
 - **Jupyter Notebook**
+
+
 
